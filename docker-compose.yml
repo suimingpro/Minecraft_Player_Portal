@@ -1,0 +1,202 @@
+services:
+  # ==========================================
+  # MariaDB Database (Production)
+  # ==========================================
+  mariadb:
+    image: mariadb:lts
+    container_name: portal-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-minecraft_portal}
+      MARIADB_USER: ${MARIADB_USER:-minecraft}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-minecraft}
+    ports:
+      - "${MARIADB_HOST_IP:-127.0.0.1}:${MARIADB_PORT:-3306}:3306"
+    volumes:
+      - ${DB_DATA_DIR:-./db/data}:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u $${MARIADB_USER:-minecraft} --password=$${MARIADB_PASSWORD:-minecraft} || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - portal-network
+
+  # ==========================================
+  # Redis Cache & Sessions (Production)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: portal-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_HOST_IP:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - portal-network
+
+  # ==========================================
+  # Backend Server (FastAPI + Yggdrasil - Production)
+  # ==========================================
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: portal-server
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ./server/.env
+    environment:
+      # Production mode flags
+      ENVIRONMENT: production
+      NODE_ENV: production
+      DEBUG: "false"
+      WORKERS: ${WORKERS:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # Database and Redis internal network connections
+      DATABASE_URL: mysql+asyncmy://${MARIADB_USER:-minecraft}:${MARIADB_PASSWORD:-minecraft}@mariadb:3306/${MARIADB_DATABASE:-minecraft_portal}
+      REDIS_URL: redis://redis:6379/0
+
+      # Server port and SSL settings (HTTP internally behind Nginx reverse proxy)
+      PORT: ${SERVER_INTERNAL_PORT:-8000}
+      SERVER_INTERNAL_PORT: ${SERVER_INTERNAL_PORT:-8000}
+      SSL_ENABLED: ${SERVER_SSL_ENABLED:-false}
+      SSL_CERTFILE: ${SSL_CERTFILE:-}
+      SSL_KEYFILE: ${SSL_KEYFILE:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+
+      # Public URLs for API and Frontend (Unified behind Nginx gateway)
+      API_BASE_URL: ${API_BASE_URL:-https://localhost}
+      FRONTEND_URL: ${FRONTEND_URL:-https://localhost}
+    # Bind to localhost by default if debug/direct access is desired, otherwise handled by Nginx gateway
+    ports:
+      - "${SERVER_HOST_IP:-127.0.0.1}:${SERVER_PORT:-8000}:${SERVER_INTERNAL_PORT:-8000}"
+    volumes:
+      - ./server/uploads:/app/uploads
+      - ${CERT_DIR:-./cert}:/app/cert
+      - ${CERT_DIR:-./cert}:/app/certs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -s -f http://127.0.0.1:${SERVER_INTERNAL_PORT:-8000}/ || curl -k -s -f https://127.0.0.1:${SERVER_INTERNAL_PORT:-8000}/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - portal-network
+
+  # ==========================================
+  # Frontend Client (Next.js 16 - Standalone Production)
+  # ==========================================
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+    container_name: portal-client
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      # Production mode flags
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: 1
+      PORT: ${CLIENT_INTERNAL_PORT:-3000}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+    # Bind to localhost by default if debug/direct access is desired, otherwise handled by Nginx gateway
+    ports:
+      - "${CLIENT_HOST_IP:-127.0.0.1}:${CLIENT_PORT:-3000}:${CLIENT_INTERNAL_PORT:-3000}"
+    volumes:
+      - ${CERT_DIR:-./cert}:/app/cert:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${CLIENT_INTERNAL_PORT:-3000}/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - portal-network
+
+  # ==========================================
+  # Nginx Gateway & Reverse Proxy (Production)
+  # ==========================================
+  nginx:
+    image: nginx:alpine
+    container_name: portal-nginx
+    restart: unless-stopped
+    depends_on:
+      client:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    environment:
+      SSL_ENABLED: ${SSL_ENABLED:-true}
+      SSL_CERTFILE: ${SSL_CERTFILE:-}
+      SSL_KEYFILE: ${SSL_KEYFILE:-}
+      UPSTREAM_CLIENT: client:3000
+      UPSTREAM_SERVER: server:8000
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/entrypoint.sh:/docker-entrypoint.d/99-portal-entrypoint.sh:ro
+      - ${CERT_DIR:-./cert}:/etc/nginx/certs:ro
+    entrypoint: ["/docker-entrypoint.d/99-portal-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - portal-network
+
+volumes:
+  redis_data:
+
+networks:
+  portal-network:
+    driver: bridge
+
