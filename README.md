@@ -1,5 +1,11 @@
 # Minecraft Player Portal
 
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Frontend-Next.js%2016-black.svg?style=flat-square&logo=next.js)](https://nextjs.org/)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg?style=flat-square&logo=react)](https://react.dev/)
+[![Ant Design](https://img.shields.io/badge/UI-Ant%20Design%205-1890FF.svg?style=flat-square&logo=antdesign)](https://ant.design/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+
 Minecraft 玩家门户与统一认证管理平台，基于 FastAPI、Next.js 16、React 19 和 Ant Design 5。提供 Microsoft Entra ID SAML 单点登录、玩家档案与皮肤管理、Yggdrasil 外置认证，以及游戏服务器白名单和黑名单管理。
 
 ## 目录
